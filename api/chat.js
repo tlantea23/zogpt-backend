@@ -1,44 +1,60 @@
-import { Redis } from '@upstash/redis';
-import OpenAI from 'openai';
+export const config = {
+  api: {
+    bodyParser: true,
+  },
+}
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const allowCors = fn => async (req, res) => {
+  res.setHeader('Access-Control-Allow-Credentials', true)
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT')
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization')
+  
+  if (req.method === 'OPTIONS') {
+    res.status(200).end()
+    return
+  }
+  return await fn(req, res)
+}
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-export default async function handler(req, res) {
-  if (req.method!== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+async function handler(req, res) {
+  // GET request lo kal chuan 405 pe ang
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed. Use POST.' })
   }
 
   try {
-    const { message, userId = 'default' } = req.body;
+    const { messages } = req.body
 
-    const history = await redis.get(userId) || [];
+    if (!messages) {
+      return res.status(400).json({ error: 'Missing messages in request body' })
+    }
 
-    const messages = [
-      { role: 'system', content: 'You are Zogpt, a helpful AI assistant.' },
-     ...history,
-      { role: 'user', content: message }
-    ];
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: messages,
+      }),
+    })
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: messages,
-    });
+    if (!response.ok) {
+      const errorData = await response.json()
+      console.error('OpenAI API Error:', errorData)
+      return res.status(response.status).json({ error: errorData })
+    }
 
-    const reply = completion.choices[0].message.content;
+    const data = await response.json()
+    return res.status(200).json(data)
 
-    const newHistory = [...history, { role: 'user', content: message }, { role: 'assistant', content: reply }];
-    await redis.set(userId, newHistory.slice(-10));
-
-    res.status(200).json({ reply });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Something went wrong' });
+    console.error('Server Error:', error)
+    return res.status(500).json({ error: 'Internal server error', details: error.message })
   }
 }
+
+export default allowCors(handler)
